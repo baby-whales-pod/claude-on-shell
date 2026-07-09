@@ -1,0 +1,87 @@
+schemaVersion: "1"
+kind: agent
+name: claude-on-shell
+displayName: Claude on Shell
+description: "Claude Code on top of the shell template, authenticated via ANTHROPIC_API_KEY (proxy)"
+
+# In schema v1 there is no "binding" regime: no "how do you want to
+# authenticate?" prompt. Credentials are discovered on the host (env-first) and
+# injected by the proxy. We declare a SINGLE mechanism (API key), so no
+# apiKey/OAuth choice is offered.
+agent:
+  # MUST match the tag built from ../template/Dockerfile.
+  image: "docker.io/philippecharriere494/sbx-my-claude-agent:0.0.1"
+  aiFilename: CLAUDE.md
+  persistence: persistent
+  entrypoint:
+    run: [claude, "--dangerously-skip-permissions"]
+
+# The proxy reads ANTHROPIC_API_KEY from the host environment (where you run
+# `sbx run`) and uses it for discovery. Nothing to type.
+credentials:
+  sources:
+    anthropic:
+      env:
+        - ANTHROPIC_API_KEY
+
+# Proxy-side injection: which requests carry the secret, and under which
+# header. The real secret never enters the container.
+network:
+  serviceDomains:
+    api.anthropic.com: anthropic
+    console.anthropic.com: anthropic
+    claude.ai: anthropic
+  serviceAuth:
+    anthropic:
+      headerName: x-api-key
+      valueFormat: "%s"
+  allowedDomains:
+    - "api.anthropic.com:443"
+    - "claude.ai:443"
+    - "console.anthropic.com:443"
+    - "downloads.claude.ai:443"
+    - "statsig.anthropic.com:443"
+
+commands:
+  install:
+    # 1. Seed ~/.claude.json: onboarding / trust / bypass flags → no "trust this
+    #    project?" dialog at launch. Written as root, then chowned.
+    - command: |
+        set -e
+        printf '%s\n' '{
+          "bypassPermissionsModeAccepted": true,
+          "hasCompletedOnboarding": true,
+          "projects": { "/": { "hasTrustDialogAccepted": true } }
+        }' > /home/agent/.claude.json
+        chown agent:agent /home/agent/.claude.json
+      user: "0"
+      description: "Seed Claude onboarding/trust flags (~/.claude.json)"
+
+    # 2. Seed ~/.claude/settings.json with apiKeyHelper: without it, Claude Code
+    #    asks for /login even though the proxy authenticates. The value is a
+    #    placeholder ("proxy-managed"): the real secret is injected by the proxy,
+    #    not here.
+    - command: |
+        set -e
+        mkdir -p /home/agent/.claude
+        printf '%s' '{
+          "themeId": 1,
+          "apiKeyHelper": "echo proxy-managed",
+          "defaultMode": "bypassPermissions",
+          "bypassPermissionsModeAccepted": true
+        }' > /home/agent/.claude/settings.json
+      user: "agent"
+      description: "Seed settings.json (apiKeyHelper → no /login)"
+
+  startup:
+    - command: ["sh", "-c", "chown -R agent:agent /home/agent/.claude 2>/dev/null || true"]
+      user: "0"
+      description: "Re-own ~/.claude to agent"
+
+agentContext: |
+  ## Claude-on-Shell sandbox
+
+  You are running in a Docker sandbox built on the `shell` template, with the
+  Claude CLI installed. `CLAUDE_ENV_FILE=/etc/sandbox-persistent.sh` is sourced
+  before every Bash command: any `export`s you add there persist from one tool
+  call to the next.
